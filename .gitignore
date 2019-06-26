@@ -16,3 +16,6 @@ __pycache__/
 # Model and other data
 *.pth
 *.npy
+
+# Folder
+notebooks/
