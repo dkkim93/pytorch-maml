@@ -8,7 +8,6 @@ from tensorboardX import SummaryWriter
 from misc.utils import set_log
 from torch.optim import SGD, Adam
 from torch.nn.modules.loss import MSELoss
-from task import OmniglotTask, MNISTTask
 from inner_loop import InnerLoop
 from omniglot_net import OmniglotNet
 from score import *
