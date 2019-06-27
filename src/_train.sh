@@ -26,15 +26,16 @@ cd $DIR
 # # Comment for using GPU
 # export CUDA_VISIBLE_DEVICES=-1
 
-exp='maml-omniglot-5way-1shot-TEST'
-dataset='omniglot'
-num_cls=5
-num_inst=1
-batch=1
-m_batch=32
-num_updates=15000
-num_inner_updates=5
-lr='5e-1'
-meta_lr='1e-2'
-gpu=0
-python3.6 maml.py $exp --dataset $dataset --num_cls $num_cls --num_inst $num_inst --batch $batch --m_batch $m_batch --num_updates $num_updates --num_inner_updates $num_inner_updates --lr $lr --meta_lr $meta_lr --gpu $gpu 2>&1 | tee ../logs/$exp
+python3.6 maml.py \
+--env-name "Regression-v0" \
+--seed 0 \
+--learner-type "meta" \
+--policy-type "continuous" \
+--ep-max-timesteps 100 \
+--n-traj 1 \
+--meta-batch-size 32 \
+--fast-num-update 5 \
+--meta-lr 0.01 \
+--fast-lr 0.5 \
+--n-agent 1 \
+--prefix ""

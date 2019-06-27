@@ -1,58 +1,45 @@
-import click
-import matplotlib.pyplot as plt
-import os
-import numpy as np
-import random
-from setproctitle import setproctitle
-import inspect
 import torch
+import argparse
+import os
+import random
+import matplotlib.pyplot as plt
+import numpy as np
+from tensorboardX import SummaryWriter
+from misc.utils import set_log
 from torch.optim import SGD, Adam
 from torch.nn.modules.loss import MSELoss
 from task import OmniglotTask, MNISTTask
 from inner_loop import InnerLoop
 from omniglot_net import OmniglotNet
 from score import *
-from data_loading import *
 from misc.batch_sampler import BatchSampler
 from misc.replay_buffer import ReplayBuffer
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class MetaLearner(object):
-    def __init__(self, dataset, num_classes, num_inst, meta_batch_size, 
-                 meta_step_size, inner_batch_size, inner_step_size,
-                 num_updates, num_inner_updates, loss_fn):
+    def __init__(self, log, tb_writer, args):
         super(self.__class__, self).__init__()
-        self.dataset = dataset
-        self.num_classes = num_classes
-        self.num_inst = num_inst
-        self.meta_batch_size = meta_batch_size
-        self.meta_step_size = meta_step_size
-        self.inner_batch_size = inner_batch_size
-        self.inner_step_size = inner_step_size
-        self.num_updates = num_updates
-        self.num_inner_updates = num_inner_updates
-        self.loss_fn = loss_fn
+        self.log = log
+        self.tb_writer = tb_writer
+        self.args = args
+        self.loss_fn = MSELoss() 
         
-        # Make the nets
-        # TODO: don't actually need two nets
-        num_input_channels = 1 if self.dataset == 'mnist' else 3
-        self.net = OmniglotNet(num_classes, self.loss_fn, num_input_channels)
-        self.net.cuda()
+        self.net = OmniglotNet(self.loss_fn, args)
+        self.net.cuda()  # TODO
 
-        self.fast_net = InnerLoop(
-            num_classes, self.loss_fn, self.num_inner_updates, self.inner_step_size, 
-            self.inner_batch_size, self.meta_batch_size, num_input_channels)
-        self.fast_net.cuda()
+        self.fast_net = InnerLoop(self.loss_fn, args)
+        self.fast_net.cuda()  # TODO
 
-        self.opt = Adam(self.net.parameters(), lr=meta_step_size)
-
+        self.opt = Adam(self.net.parameters(), lr=args.meta_lr)
         self.sampler = BatchSampler()
         self.memory = ReplayBuffer()
 
     def visualize(self, episodes_i, episodes_i_, predictions_, task_id):
         for i_agent in range(1):
-            sample = episodes_i.observations[:, :, i_agent].cpu().data.numpy()
-            label = episodes_i.rewards[:, :, i_agent].cpu().data.numpy()
+            # sample = episodes_i.observations[:, :, i_agent].cpu().data.numpy()
+            # label = episodes_i.rewards[:, :, i_agent].cpu().data.numpy()
             sample_ = episodes_i_.observations[:, :, i_agent].cpu().data.numpy()
             label_ = episodes_i_.rewards[:, :, i_agent].cpu().data.numpy()
             prediction_ = predictions_.cpu().data.numpy()
@@ -108,18 +95,17 @@ class MetaLearner(object):
             h.remove()
 
     def test(self, it, episode_i_):
-        num_in_channels = 1 if self.dataset == 'mnist' else 3
-        test_net = OmniglotNet(self.num_classes, self.loss_fn, num_in_channels)
+        test_net = OmniglotNet(self.loss_fn, self.args)
 
         # Make a test net with same parameters as our current net
         test_net.copy_weights(self.net)
-        test_net.cuda()
-        test_opt = SGD(test_net.parameters(), lr=self.inner_step_size)
+        test_net.cuda()  # TODO
+        test_opt = SGD(test_net.parameters(), lr=self.args.fast_lr)
 
-        episode_i = self.memory.storage[it -1 ]
+        episode_i = self.memory.storage[it - 1]
 
         # Train on the train examples, using the same number of updates as in training
-        for i in range(self.num_inner_updates):
+        for i in range(self.args.fast_num_update):
             in_ = episode_i.observations[:, :, 0]
             target = episode_i.rewards[:, :, 0]
             loss, _ = forward_pass(test_net, in_, target)
@@ -138,17 +124,12 @@ class MetaLearner(object):
         print('Meta train:', mtr_loss)
         print('Meta val:', mval_loss)
         print('-------------------------')
-        del test_net  # NOTE Deleted!
+        del test_net
 
         self.visualize(episode_i, episode_i_, predictions_, it)
-
-        return mtr_loss, mval_loss
             
-    def train(self, exp):
-        tr_loss, val_loss = [], []
-        mtr_loss, mval_loss = [], []
-
-        for it in range(self.num_updates):
+    def train(self):
+        for it in range(10000):
             # Sample episode from current task
             self.sampler.reset_task(it)
             episodes = self.sampler.sample()
@@ -158,16 +139,12 @@ class MetaLearner(object):
 
             # Evaluate on test tasks
             if len(self.memory) > 1:
-                mt_loss, mv_loss = self.test(it, episodes)
-                mtr_loss.append(mt_loss)
-                mval_loss.append(mv_loss)
+                self.test(it, episodes)
 
             # Collect a meta batch update
             if len(self.memory) > 2:
                 meta_grads = []
-                tloss, vloss = 0.0, 0.0
-                for i in range(self.meta_batch_size):
-                    # task = self.get_task('../data/{}'.format(self.dataset), self.num_classes, self.num_inst)
+                for i in range(self.args.meta_batch_size):
                     if i == 0:
                         episodes_i = self.memory.storage[it - 1]
                         episodes_i_ = self.memory.storage[it] 
@@ -175,67 +152,109 @@ class MetaLearner(object):
                         episodes_i, episodes_i_ = self.memory.sample()
 
                     self.fast_net.copy_weights(self.net)
-                    metrics, meta_grad = self.fast_net.forward(episodes_i, episodes_i_)
-                    (trl, vall) = metrics
+                    meta_grad = self.fast_net.forward(episodes_i, episodes_i_)
                     meta_grads.append(meta_grad)
-                    tloss += trl
-                    vloss += vall
 
                 # Perform the meta update
                 self.meta_update(episodes_i, meta_grads)
 
-                # # Save a model snapshot every now and then
-                # if it % 500 == 0:
-                #     torch.save(self.net.state_dict(), '../output/{}/train_iter_{}.pth'.format(exp, it))
 
-                # # Save stuff
-                # tr_loss.append(tloss / self.meta_batch_size)
-                # val_loss.append(vloss / self.meta_batch_size)
-                # np.save('../output/{}/tr_loss.npy'.format(exp), np.array(tr_loss))
-                # np.save('../output/{}/val_loss.npy'.format(exp), np.array(val_loss))
-                # np.save('../output/{}/meta_tr_loss.npy'.format(exp), np.array(mtr_loss))
-                # np.save('../output/{}/meta_val_loss.npy'.format(exp), np.array(mval_loss))
+def main(args):
+    # Create dir
+    if not os.path.exists("./logs"):
+        os.makedirs("./logs")
+    if not os.path.exists("./pytorch_models"):
+        os.makedirs("./pytorch_models")
 
-
-@click.command()
-@click.argument('exp')
-@click.option('--dataset', type=str)
-@click.option('--num_cls', type=int)
-@click.option('--num_inst', type=int)
-@click.option('--batch', type=int)
-@click.option('--m_batch', type=int)
-@click.option('--num_updates', type=int)
-@click.option('--num_inner_updates', type=int)
-@click.option('--lr', type=str)
-@click.option('--meta_lr', type=str)
-@click.option('--gpu', default=0)
-def main(exp, dataset, num_cls, num_inst, batch, m_batch, num_updates, num_inner_updates, lr, meta_lr, gpu):
-    random.seed(1337)
-    np.random.seed(1337)
-    setproctitle(exp)
-
-    # Print all the args for logging purposes
-    frame = inspect.currentframe()
-    args, _, _, values = inspect.getargvalues(frame)
-    for arg in args:
-        print(arg, values[arg])
-
-    # make output dir
-    output = '../output/{}'.format(exp)
-    try:
-        os.makedirs(output)
-    except:
-        pass
+    # Set logs
+    tb_writer = SummaryWriter('./logs/tb_{0}'.format(args.log_name))
+    log = set_log(args)
+    
+    # Set seeds
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if device == torch.device("cuda"):
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
 
     # Set the gpu
-    print('Setting GPU to', str(gpu))
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
-    loss_fn = MSELoss() 
-    learner = MetaLearner(
-        dataset, num_cls, num_inst, m_batch, float(meta_lr), batch, 
-        float(lr), num_updates, num_inner_updates, loss_fn)
-    learner.train(exp)
+    learner = MetaLearner(log, tb_writer, args)
+    learner.train()
+    
+    # # Prepare for training
+    # sampler = BatchSampler(args)
+    # memory = ReplayBuffer(args)
+    # base_learner, fast_learner = set_learner(sampler, log, tb_writer, args)
+    # 
+    # # Start training
+    # train(
+    #     sampler=sampler, memory=memory, base_learner=base_learner,
+    #     fast_learner=fast_learner, log=log, tb_writer=tb_writer, args=args)
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="")
+
+    # General
+    parser.add_argument(
+        "--policy-type", type=str,
+        choices=["discrete", "continuous", "normal"],
+        help="Policy type available only for discrete, normal, and continuous")
+    parser.add_argument(
+        "--learner-type", type=str,
+        choices=["meta", "finetune"],
+        help="Learner type available only for meta, finetune")
+    parser.add_argument(
+        "--n-hidden", default=64, type=int,
+        help="Number of hidden units")
+    parser.add_argument(
+        "--n-traj", default=1, type=int,
+        help="Number of trajectory to collect from each task")
+
+    # Meta-learning
+    parser.add_argument(
+        "--meta-batch-size", default=25, type=int,
+        help="Number of tasks to sample for meta parameter update")
+    parser.add_argument(
+        "--fast-num-update", default=5, type=int,
+        help="Number of updates for adaptation")
+    parser.add_argument(
+        "--meta-lr", default=0.03, type=float,
+        help="Meta learning rate")
+    parser.add_argument(
+        "--fast-lr", default=10.0, type=float,
+        help="Adaptation learning rate")
+    parser.add_argument(
+        "--first-order", action="store_true",
+        help="Adaptation learning rate")
+
+    # Env
+    parser.add_argument(
+        "--env-name", default="", type=str,
+        help="OpenAI gym environment name")
+    parser.add_argument(
+        "--ep-max-timesteps", default=10, type=int,
+        help="Episode is terminated when max timestep is reached.")
+    parser.add_argument(
+        "--n-agent", default=1, type=int,
+        help="Number of agents in the environment")
+
+    # Misc
+    parser.add_argument(
+        "--seed", default=0, type=int,
+        help="Sets Gym, PyTorch and Numpy seeds")
+    parser.add_argument(
+        "--prefix", default="", type=str,
+        help="Prefix for tb_writer and logging")
+
+    args = parser.parse_args()
+
+    # Set log name
+    args.log_name = \
+        "env::%s_seed::%s_learner_type::%s_meta_batch_size::%s_meta_lr::%s_fast_num_update::%s_" \
+        "fast_lr::%s_prefix::%s_log" % (
+            args.env_name, str(args.seed), args.learner_type, args.meta_batch_size, args.meta_lr,
+            args.fast_num_update, args.fast_lr, args.prefix)
+
+    main(args=args) 
