@@ -39,15 +39,14 @@ class InnerLoop(OmniglotNet):
         loss = self.loss_fn(out, target_var)
         return loss, out
     
-    def forward(self, task):
-        train_loader = get_data_loader(task, self.batch_size)
-        val_loader = get_data_loader(task, self.batch_size, split='val')
-        tr_pre_loss, tr_pre_acc = evaluate(self, train_loader)
-        val_pre_loss, val_pre_acc = evaluate(self, val_loader)
+    def forward(self, episode_i, episode_i_):
+        tr_pre_loss, _ = evaluate(self, episode_i)
+        val_pre_loss, _ = evaluate(self, episode_i_)
 
         fast_weights = OrderedDict((name, param) for (name, param) in self.named_parameters())
         for i in range(self.num_updates):
-            in_, target = train_loader.__iter__().next()
+            in_ = episode_i.observations[:, :, 0]
+            target = episode_i.rewards[:, :, 0]
             if i == 0:
                 loss, _ = self.forward_pass(in_, target, weights=None)
                 grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
@@ -59,19 +58,18 @@ class InnerLoop(OmniglotNet):
                 (name, param - self.step_size * grad)
                 for ((name, param), grad) in zip(fast_weights.items(), grads))
 
-        tr_post_loss, tr_post_acc = evaluate(self, train_loader, fast_weights)
-        val_post_loss, val_post_acc = evaluate(self, val_loader, fast_weights) 
-        print('\n Train Inner step Loss', tr_pre_loss, tr_post_loss)
-        print('Train Inner step Acc', tr_pre_acc, tr_post_acc)
-        print('\n Val Inner step Loss', val_pre_loss, val_post_loss)
-        print('Val Inner step Acc', val_pre_acc, val_post_acc)
+        tr_post_loss, _ = evaluate(self, episode_i, fast_weights)
+        val_post_loss, _ = evaluate(self, episode_i_, fast_weights) 
+        print('Train Inner step Loss', tr_pre_loss, tr_post_loss)
+        print('Val Inner step Loss', val_pre_loss, val_post_loss)
         
         # Compute the meta gradient and return it
-        in_, target = val_loader.__iter__().next()
+        in_ = episode_i_.observations[:, :, 0]
+        target = episode_i_.rewards[:, :, 0]
         loss, _ = self.forward_pass(in_, target, weights=fast_weights) 
         loss = loss / self.meta_batch_size  # normalize loss
         grads = torch.autograd.grad(loss, self.parameters())  # NOTE self.parameters() and create_graph = False
         meta_grads = {name: g for ((name, _), g) in zip(self.named_parameters(), grads)}
-        metrics = (tr_post_loss, tr_post_acc, val_post_loss, val_post_acc)
+        metrics = (tr_post_loss, val_post_loss)
 
         return metrics, meta_grads

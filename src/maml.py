@@ -1,4 +1,5 @@
 import click
+import matplotlib.pyplot as plt
 import os
 import numpy as np
 import random
@@ -6,12 +7,14 @@ from setproctitle import setproctitle
 import inspect
 import torch
 from torch.optim import SGD, Adam
-from torch.nn.modules.loss import CrossEntropyLoss
+from torch.nn.modules.loss import MSELoss
 from task import OmniglotTask, MNISTTask
 from inner_loop import InnerLoop
 from omniglot_net import OmniglotNet
 from score import *
 from data_loading import *
+from misc.batch_sampler import BatchSampler
+from misc.replay_buffer import ReplayBuffer
 
 
 class MetaLearner(object):
@@ -43,6 +46,25 @@ class MetaLearner(object):
 
         self.opt = Adam(self.net.parameters(), lr=meta_step_size)
 
+        self.sampler = BatchSampler()
+        self.memory = ReplayBuffer()
+
+    def visualize(self, episodes_i, episodes_i_, predictions_, task_id):
+        for i_agent in range(1):
+            sample = episodes_i.observations[:, :, i_agent].cpu().data.numpy()
+            label = episodes_i.rewards[:, :, i_agent].cpu().data.numpy()
+            sample_ = episodes_i_.observations[:, :, i_agent].cpu().data.numpy()
+            label_ = episodes_i_.rewards[:, :, i_agent].cpu().data.numpy()
+            prediction_ = predictions_.cpu().data.numpy()
+    
+            # plt.scatter(sample, label, label="Label" + str(i_agent))
+            plt.scatter(sample_, label_, label="Label_" + str(i_agent))
+            plt.scatter(sample_, prediction_, label="Prediction_" + str(i_agent))
+    
+        plt.legend()
+        plt.savefig("./logs/" + str(task_id) + ".png", bbox_inches="tight")
+        plt.close()
+
     def get_task(self, root, n_cl, n_inst, split='train'):
         if 'mnist' in root:
             return MNISTTask(root, n_cl, n_inst, split)
@@ -52,9 +74,9 @@ class MetaLearner(object):
             print('Unknown dataset')
             raise(Exception)
 
-    def meta_update(self, task, ls):
-        loader = get_data_loader(task, self.inner_batch_size, split='val')
-        in_, target = loader.__iter__().next()
+    def meta_update(self, episode_i, ls):
+        in_ = episode_i.observations[:, :, 0]
+        target = episode_i.rewards[:, :, 0]
 
         # We use a dummy forward / backward pass to get the correct grads into self.net
         loss, out = forward_pass(self.net, in_, target)
@@ -85,94 +107,94 @@ class MetaLearner(object):
         for h in hooks:
             h.remove()
 
-    def test(self):
+    def test(self, it, episode_i_):
         num_in_channels = 1 if self.dataset == 'mnist' else 3
         test_net = OmniglotNet(self.num_classes, self.loss_fn, num_in_channels)
-        mtr_loss, mtr_acc, mval_loss, mval_acc = 0.0, 0.0, 0.0, 0.0
-        # Select ten tasks randomly from the test set to evaluate on
-        for _ in range(10):
-            # Make a test net with same parameters as our current net
-            test_net.copy_weights(self.net)
-            test_net.cuda()
-            test_opt = SGD(test_net.parameters(), lr=self.inner_step_size)
-            task = self.get_task('../data/{}'.format(self.dataset), self.num_classes, self.num_inst, split='test')
-            # Train on the train examples, using the same number of updates as in training
-            train_loader = get_data_loader(task, self.inner_batch_size, split='train')
-            for i in range(self.num_inner_updates):
-                in_, target = train_loader.__iter__().next()
-                loss, _ = forward_pass(test_net, in_, target)
-                test_opt.zero_grad()
-                loss.backward()
-                test_opt.step()
-            # Evaluate the trained model on train and val examples
-            tloss, tacc = evaluate(test_net, train_loader)
-            val_loader = get_data_loader(task, self.inner_batch_size, split='val')
-            vloss, vacc = evaluate(test_net, val_loader)
-            mtr_loss += tloss
-            mtr_acc += tacc
-            mval_loss += vloss
-            mval_acc += vacc
 
-        mtr_loss = mtr_loss / 10
-        mtr_acc = mtr_acc / 10
-        mval_loss = mval_loss / 10
-        mval_acc = mval_acc / 10
+        # Make a test net with same parameters as our current net
+        test_net.copy_weights(self.net)
+        test_net.cuda()
+        test_opt = SGD(test_net.parameters(), lr=self.inner_step_size)
+
+        episode_i = self.memory.storage[it -1 ]
+
+        # Train on the train examples, using the same number of updates as in training
+        for i in range(self.num_inner_updates):
+            in_ = episode_i.observations[:, :, 0]
+            target = episode_i.rewards[:, :, 0]
+            loss, _ = forward_pass(test_net, in_, target)
+            print("loss {} at {}".format(loss, it))
+            test_opt.zero_grad()
+            loss.backward()
+            test_opt.step()
+
+        # Evaluate the trained model on train and val examples
+        tloss, _ = evaluate(test_net, episode_i)
+        vloss, predictions_ = evaluate(test_net, episode_i_)
+        mtr_loss = tloss / 10.
+        mval_loss = vloss / 10.
 
         print('-------------------------')
-        print('Meta train:', mtr_loss, mtr_acc)
-        print('Meta val:', mval_loss, mval_acc)
+        print('Meta train:', mtr_loss)
+        print('Meta val:', mval_loss)
         print('-------------------------')
         del test_net  # NOTE Deleted!
-        return mtr_loss, mtr_acc, mval_loss, mval_acc
+
+        self.visualize(episode_i, episode_i_, predictions_, it)
+
+        return mtr_loss, mval_loss
             
     def train(self, exp):
-        tr_loss, tr_acc, val_loss, val_acc = [], [], [], []
-        mtr_loss, mtr_acc, mval_loss, mval_acc = [], [], [], []
+        tr_loss, val_loss = [], []
+        mtr_loss, mval_loss = [], []
 
         for it in range(self.num_updates):
-            # # Evaluate on test tasks
-            # mt_loss, mt_acc, mv_loss, mv_acc = self.test()
-            # mtr_loss.append(mt_loss)
-            # mtr_acc.append(mt_acc)
-            # mval_loss.append(mv_loss)
-            # mval_acc.append(mv_acc)
+            # Sample episode from current task
+            self.sampler.reset_task(it)
+            episodes = self.sampler.sample()
+
+            # Add to memory
+            self.memory.add(it, episodes)
+
+            # Evaluate on test tasks
+            if len(self.memory) > 1:
+                mt_loss, mv_loss = self.test(it, episodes)
+                mtr_loss.append(mt_loss)
+                mval_loss.append(mv_loss)
 
             # Collect a meta batch update
-            meta_grads = []
-            tloss, tacc, vloss, vacc = 0.0, 0.0, 0.0, 0.0
-            for i in range(self.meta_batch_size):
-                task = self.get_task('../data/{}'.format(self.dataset), self.num_classes, self.num_inst)
-                self.fast_net.copy_weights(self.net)
-                metrics, meta_grad = self.fast_net.forward(task)
-                (trl, tra, vall, vala) = metrics
-                meta_grads.append(meta_grad)
-                tloss += trl
-                tacc += tra
-                vloss += vall
-                vacc += vala
+            if len(self.memory) > 2:
+                meta_grads = []
+                tloss, vloss = 0.0, 0.0
+                for i in range(self.meta_batch_size):
+                    # task = self.get_task('../data/{}'.format(self.dataset), self.num_classes, self.num_inst)
+                    if i == 0:
+                        episodes_i = self.memory.storage[it - 1]
+                        episodes_i_ = self.memory.storage[it] 
+                    else:
+                        episodes_i, episodes_i_ = self.memory.sample()
 
-            # Perform the meta update
-            self.meta_update(task, meta_grads)
+                    self.fast_net.copy_weights(self.net)
+                    metrics, meta_grad = self.fast_net.forward(episodes_i, episodes_i_)
+                    (trl, vall) = metrics
+                    meta_grads.append(meta_grad)
+                    tloss += trl
+                    vloss += vall
 
-            # Save a model snapshot every now and then
-            if it % 500 == 0:
-                torch.save(self.net.state_dict(), '../output/{}/train_iter_{}.pth'.format(exp, it))
+                # Perform the meta update
+                self.meta_update(episodes_i, meta_grads)
 
-            # Save stuff
-            tr_loss.append(tloss / self.meta_batch_size)
-            tr_acc.append(tacc / self.meta_batch_size)
-            val_loss.append(vloss / self.meta_batch_size)
-            val_acc.append(vacc / self.meta_batch_size)
+                # # Save a model snapshot every now and then
+                # if it % 500 == 0:
+                #     torch.save(self.net.state_dict(), '../output/{}/train_iter_{}.pth'.format(exp, it))
 
-            np.save('../output/{}/tr_loss.npy'.format(exp), np.array(tr_loss))
-            np.save('../output/{}/tr_acc.npy'.format(exp), np.array(tr_acc))
-            np.save('../output/{}/val_loss.npy'.format(exp), np.array(val_loss))
-            np.save('../output/{}/val_acc.npy'.format(exp), np.array(val_acc))
-
-            np.save('../output/{}/meta_tr_loss.npy'.format(exp), np.array(mtr_loss))
-            np.save('../output/{}/meta_tr_acc.npy'.format(exp), np.array(mtr_acc))
-            np.save('../output/{}/meta_val_loss.npy'.format(exp), np.array(mval_loss))
-            np.save('../output/{}/meta_val_acc.npy'.format(exp), np.array(mval_acc))
+                # # Save stuff
+                # tr_loss.append(tloss / self.meta_batch_size)
+                # val_loss.append(vloss / self.meta_batch_size)
+                # np.save('../output/{}/tr_loss.npy'.format(exp), np.array(tr_loss))
+                # np.save('../output/{}/val_loss.npy'.format(exp), np.array(val_loss))
+                # np.save('../output/{}/meta_tr_loss.npy'.format(exp), np.array(mtr_loss))
+                # np.save('../output/{}/meta_val_loss.npy'.format(exp), np.array(mval_loss))
 
 
 @click.command()
@@ -208,7 +230,7 @@ def main(exp, dataset, num_cls, num_inst, batch, m_batch, num_updates, num_inner
     # Set the gpu
     print('Setting GPU to', str(gpu))
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
-    loss_fn = CrossEntropyLoss() 
+    loss_fn = MSELoss() 
     learner = MetaLearner(
         dataset, num_cls, num_inst, m_batch, float(meta_lr), batch, 
         float(lr), num_updates, num_inner_updates, loss_fn)
