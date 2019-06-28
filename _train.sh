@@ -37,5 +37,5 @@ python3.6 main.py \
 --fast-num-update 5 \
 --meta-lr 0.01 \
 --fast-lr 0.5 \
---n-agent 1 \
+--n-agent 2 \
 --prefix ""

@@ -27,14 +27,14 @@ class InnerLoop(OmniglotNet):
         loss = self.loss_fn(out, target_var)
         return loss, out
     
-    def forward(self, episode_i, episode_i_):
-        tr_pre_loss, _ = evaluate(self, episode_i)
-        val_pre_loss, _ = evaluate(self, episode_i_)
+    def forward(self, episode_i, episode_i_, i_agent):
+        tr_pre_loss, _ = evaluate(self, episode_i, i_agent)
+        val_pre_loss, _ = evaluate(self, episode_i_, i_agent)
 
         fast_weights = OrderedDict((name, param) for (name, param) in self.named_parameters())
         for i in range(self.args.fast_num_update):
-            in_ = episode_i.observations[:, :, 0]
-            target = episode_i.rewards[:, :, 0]
+            in_ = episode_i.observations[:, :, i_agent]
+            target = episode_i.rewards[:, :, i_agent]
             if i == 0:
                 loss, _ = self.forward_pass(in_, target, weights=None)
                 grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
@@ -46,14 +46,14 @@ class InnerLoop(OmniglotNet):
                 (name, param - self.args.fast_lr * grad)
                 for ((name, param), grad) in zip(fast_weights.items(), grads))
 
-        tr_post_loss, _ = evaluate(self, episode_i, fast_weights)
-        val_post_loss, _ = evaluate(self, episode_i_, fast_weights) 
+        tr_post_loss, _ = evaluate(self, episode_i, i_agent, fast_weights)
+        val_post_loss, _ = evaluate(self, episode_i_, i_agent, fast_weights) 
         print('Train Inner step Loss', tr_pre_loss, tr_post_loss)
         print('Val Inner step Loss', val_pre_loss, val_post_loss)
         
         # Compute the meta gradient and return it
-        in_ = episode_i_.observations[:, :, 0]
-        target = episode_i_.rewards[:, :, 0]
+        in_ = episode_i_.observations[:, :, i_agent]
+        target = episode_i_.rewards[:, :, i_agent]
         loss, _ = self.forward_pass(in_, target, weights=fast_weights) 
         loss = loss / self.args.meta_batch_size
         grads = torch.autograd.grad(loss, self.parameters())

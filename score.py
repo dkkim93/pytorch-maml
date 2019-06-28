@@ -17,9 +17,9 @@ def forward_pass(net, in_, target, weights=None):
     return loss, out
 
 
-def evaluate(net, episode, weights=None):
-    in_ = episode.observations[:, :, 0]
-    target = episode.rewards[:, :, 0]
+def evaluate(net, episode, i_agent, weights=None):
+    in_ = episode.observations[:, :, i_agent]
+    target = episode.rewards[:, :, i_agent]
     l, out = forward_pass(net, in_, target, weights)
     loss = l.data.cpu().numpy()
 

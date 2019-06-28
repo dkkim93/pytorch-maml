@@ -89,7 +89,7 @@ def visualize(episodes_i, episodes_i_, predictions_, task_id, args):
         # label = episodes_i.rewards[:, :, i_agent].cpu().data.numpy()
         sample_ = episodes_i_.observations[:, :, i_agent].cpu().data.numpy()
         label_ = episodes_i_.rewards[:, :, i_agent].cpu().data.numpy()
-        prediction_ = predictions_.cpu().data.numpy()
+        prediction_ = predictions_[i_agent].cpu().data.numpy()
 
         # plt.scatter(sample, label, label="Label" + str(i_agent))
         plt.scatter(sample_, label_, label="Label_" + str(i_agent))

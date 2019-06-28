@@ -24,11 +24,9 @@ class MetaLearner(object):
         self.args = args
         self.loss_fn = MSELoss() 
         
-        self.net = OmniglotNet(self.loss_fn, args)
-        self.net.to(device)
+        self.net = OmniglotNet(self.loss_fn, args).to(device)
 
-        self.fast_net = InnerLoop(self.loss_fn, args)
-        self.fast_net.to(device)
+        self.fast_net = InnerLoop(self.loss_fn, args).to(device)
 
         self.opt = Adam(self.net.parameters(), lr=args.meta_lr)
         self.sampler = BatchSampler(args)
@@ -68,36 +66,39 @@ class MetaLearner(object):
             h.remove()
 
     def test(self, i_task, episode_i_):
-        test_net = OmniglotNet(self.loss_fn, self.args)
+        predictions_ = []
+        for i_agent in range(self.args.n_agent):
+            test_net = OmniglotNet(self.loss_fn, self.args).to(device)
 
-        # Make a test net with same parameters as our current net
-        test_net.copy_weights(self.net)
-        test_net.to(device)
-        test_opt = SGD(test_net.parameters(), lr=self.args.fast_lr)
+            # Make a test net with same parameters as our current net
+            test_net.copy_weights(self.net)
+            test_opt = SGD(test_net.parameters(), lr=self.args.fast_lr)
 
-        episode_i = self.memory.storage[i_task - 1]
+            episode_i = self.memory.storage[i_task - 1]
 
-        # Train on the train examples, using the same number of updates as in training
-        for i in range(self.args.fast_num_update):
-            in_ = episode_i.observations[:, :, 0]
-            target = episode_i.rewards[:, :, 0]
-            loss, _ = forward_pass(test_net, in_, target)
-            print("loss {} at {}".format(loss, i_task))
-            test_opt.zero_grad()
-            loss.backward()
-            test_opt.step()
+            # Train on the train examples, using the same number of updates as in training
+            for i in range(self.args.fast_num_update):
+                in_ = episode_i.observations[:, :, i_agent]
+                target = episode_i.rewards[:, :, i_agent]
+                loss, _ = forward_pass(test_net, in_, target)
+                print("loss {} at {}".format(loss, i_task))
+                test_opt.zero_grad()
+                loss.backward()
+                test_opt.step()
 
-        # Evaluate the trained model on train and val examples
-        tloss, _ = evaluate(test_net, episode_i)
-        vloss, predictions_ = evaluate(test_net, episode_i_)
-        mtr_loss = tloss / 10.
-        mval_loss = vloss / 10.
+            # Evaluate the trained model on train and val examples
+            tloss, _ = evaluate(test_net, episode_i, i_agent)
+            vloss, prediction_ = evaluate(test_net, episode_i_, i_agent)
+            mtr_loss = tloss / 10.
+            mval_loss = vloss / 10.
 
-        print('-------------------------')
-        print('Meta train:', mtr_loss)
-        print('Meta val:', mval_loss)
-        print('-------------------------')
-        del test_net
+            print('-------------------------')
+            print('Meta train:', mtr_loss)
+            print('Meta val:', mval_loss)
+            print('-------------------------')
+            del test_net
+
+            predictions_.append(prediction_)
 
         visualize(episode_i, episode_i_, predictions_, i_task, self.args)
             
@@ -125,8 +126,9 @@ class MetaLearner(object):
                         episodes_i, episodes_i_ = self.memory.sample()
 
                     self.fast_net.copy_weights(self.net)
-                    meta_grad = self.fast_net.forward(episodes_i, episodes_i_)
-                    meta_grads.append(meta_grad)
+                    for i_agent in range(self.args.n_agent):
+                        meta_grad = self.fast_net.forward(episodes_i, episodes_i_, i_agent)
+                        meta_grads.append(meta_grad)
 
                 # Perform the meta update
                 self.meta_update(episodes_i, meta_grads)
