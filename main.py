@@ -2,10 +2,9 @@ import torch
 import argparse
 import os
 import random
-import matplotlib.pyplot as plt
 import numpy as np
 from tensorboardX import SummaryWriter
-from misc.utils import set_log
+from misc.utils import set_log, visualize
 from torch.optim import SGD, Adam
 from torch.nn.modules.loss import MSELoss
 from inner_loop import InnerLoop
@@ -26,39 +25,14 @@ class MetaLearner(object):
         self.loss_fn = MSELoss() 
         
         self.net = OmniglotNet(self.loss_fn, args)
-        self.net.cuda()  # TODO
+        self.net.to(device)
 
         self.fast_net = InnerLoop(self.loss_fn, args)
-        self.fast_net.cuda()  # TODO
+        self.fast_net.to(device)
 
         self.opt = Adam(self.net.parameters(), lr=args.meta_lr)
-        self.sampler = BatchSampler()
+        self.sampler = BatchSampler(args)
         self.memory = ReplayBuffer()
-
-    def visualize(self, episodes_i, episodes_i_, predictions_, task_id):
-        for i_agent in range(1):
-            # sample = episodes_i.observations[:, :, i_agent].cpu().data.numpy()
-            # label = episodes_i.rewards[:, :, i_agent].cpu().data.numpy()
-            sample_ = episodes_i_.observations[:, :, i_agent].cpu().data.numpy()
-            label_ = episodes_i_.rewards[:, :, i_agent].cpu().data.numpy()
-            prediction_ = predictions_.cpu().data.numpy()
-    
-            # plt.scatter(sample, label, label="Label" + str(i_agent))
-            plt.scatter(sample_, label_, label="Label_" + str(i_agent))
-            plt.scatter(sample_, prediction_, label="Prediction_" + str(i_agent))
-    
-        plt.legend()
-        plt.savefig("./logs/" + str(task_id) + ".png", bbox_inches="tight")
-        plt.close()
-
-    def get_task(self, root, n_cl, n_inst, split='train'):
-        if 'mnist' in root:
-            return MNISTTask(root, n_cl, n_inst, split)
-        elif 'omniglot' in root:
-            return OmniglotTask(root, n_cl, n_inst, split)
-        else:
-            print('Unknown dataset')
-            raise(Exception)
 
     def meta_update(self, episode_i, ls):
         in_ = episode_i.observations[:, :, 0]
@@ -93,22 +67,22 @@ class MetaLearner(object):
         for h in hooks:
             h.remove()
 
-    def test(self, it, episode_i_):
+    def test(self, i_task, episode_i_):
         test_net = OmniglotNet(self.loss_fn, self.args)
 
         # Make a test net with same parameters as our current net
         test_net.copy_weights(self.net)
-        test_net.cuda()  # TODO
+        test_net.to(device)
         test_opt = SGD(test_net.parameters(), lr=self.args.fast_lr)
 
-        episode_i = self.memory.storage[it - 1]
+        episode_i = self.memory.storage[i_task - 1]
 
         # Train on the train examples, using the same number of updates as in training
         for i in range(self.args.fast_num_update):
             in_ = episode_i.observations[:, :, 0]
             target = episode_i.rewards[:, :, 0]
             loss, _ = forward_pass(test_net, in_, target)
-            print("loss {} at {}".format(loss, it))
+            print("loss {} at {}".format(loss, i_task))
             test_opt.zero_grad()
             loss.backward()
             test_opt.step()
@@ -125,28 +99,28 @@ class MetaLearner(object):
         print('-------------------------')
         del test_net
 
-        self.visualize(episode_i, episode_i_, predictions_, it)
+        visualize(episode_i, episode_i_, predictions_, i_task, self.args)
             
     def train(self):
-        for it in range(10000):
+        for i_task in range(10000):
             # Sample episode from current task
-            self.sampler.reset_task(it)
+            self.sampler.reset_task(i_task)
             episodes = self.sampler.sample()
 
             # Add to memory
-            self.memory.add(it, episodes)
+            self.memory.add(i_task, episodes)
 
             # Evaluate on test tasks
             if len(self.memory) > 1:
-                self.test(it, episodes)
+                self.test(i_task, episodes)
 
             # Collect a meta batch update
             if len(self.memory) > 2:
                 meta_grads = []
                 for i in range(self.args.meta_batch_size):
                     if i == 0:
-                        episodes_i = self.memory.storage[it - 1]
-                        episodes_i_ = self.memory.storage[it] 
+                        episodes_i = self.memory.storage[i_task - 1]
+                        episodes_i_ = self.memory.storage[i_task] 
                     else:
                         episodes_i, episodes_i_ = self.memory.sample()
 
@@ -181,16 +155,6 @@ def main(args):
     learner = MetaLearner(log, tb_writer, args)
     learner.train()
     
-    # # Prepare for training
-    # sampler = BatchSampler(args)
-    # memory = ReplayBuffer(args)
-    # base_learner, fast_learner = set_learner(sampler, log, tb_writer, args)
-    # 
-    # # Start training
-    # train(
-    #     sampler=sampler, memory=memory, base_learner=base_learner,
-    #     fast_learner=fast_learner, log=log, tb_writer=tb_writer, args=args)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")

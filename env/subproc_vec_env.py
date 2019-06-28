@@ -1,15 +1,15 @@
+import gym
 import numpy as np
 import multiprocessing as mp
-import gym
 import queue as queue
 
 
 class EnvWorker(mp.Process):
-    def __init__(self, remote, env_fn, queue, lock, worker_id):
+    def __init__(self, remote, env_fn, queue, lock, worker_id, args):
         super(EnvWorker, self).__init__()
         self.remote = remote
         self.env = env_fn()
-        self.env._max_episode_steps = 300
+        self.env._max_episode_steps = args.ep_max_timesteps
         self.queue = queue
         self.lock = lock
         self.task_id = None
@@ -60,12 +60,12 @@ class EnvWorker(mp.Process):
 
 
 class SubprocVecEnv(gym.Env):
-    def __init__(self, envs, queue):
+    def __init__(self, envs, queue, args):
         self.lock = mp.Lock()
         self.remotes, self.work_remotes = zip(*[mp.Pipe() for _ in envs])
         worker_ids = list(range(len(envs)))
         self.workers = [
-            EnvWorker(remote, env_fn, queue, self.lock, worker_id) 
+            EnvWorker(remote, env_fn, queue, self.lock, worker_id, args) 
             for (remote, env_fn, worker_id) in zip(self.work_remotes, envs, worker_ids)]
         for worker in self.workers:
             worker.daemon = True

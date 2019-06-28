@@ -9,12 +9,16 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class BatchSampler(object):
-    def __init__(self):
-        self.num_workers = 1
+    def __init__(self, args):
+        self.args = args
+        self.num_workers = mp.cpu_count() - 1
+        if self.num_workers > args.n_traj:
+            self.num_workers = args.n_traj
+
         self.queue = mp.Queue()
         self.envs = SubprocVecEnv(
-            envs=[make_env("Regression-v0") for _ in range(self.num_workers)], 
-            queue=self.queue)
+            envs=[make_env(args.env_name, args.n_agent) for _ in range(self.num_workers)], 
+            queue=self.queue, args=args)
 
         # Set seed to envs
         self.envs.seed(0)

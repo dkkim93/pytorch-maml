@@ -1,8 +1,6 @@
-import math
-import torch
 import logging
 import gym
-import numpy as np
+import matplotlib.pyplot as plt
 
 
 def set_logger(logger_name, log_file, level=logging.INFO):
@@ -32,13 +30,13 @@ def set_log(args):
     return log
 
 
-def make_env(env_name):
+def make_env(env_name, n_agent):
     """Load gym environment: ["Regression-v0"]
     Ref: https://github.com/tristandeleu/pytorch-maml-rl/blob/master/maml_rl/sampler.py
     """
     def _make_env():
         if env_name == "Regression-v0":
-            return gym.make(env_name, n_agent=1)
+            return gym.make(env_name, n_agent=n_agent)
         else:
             return gym.make(env_name)
     return _make_env
@@ -85,16 +83,18 @@ def set_learner(sampler, log, tb_writer, args):
     return base_learner, fast_learner
 
 
-def normalize(value, min_value, max_value):
-    assert min_value < max_value
-    return 2. * (value - min_value) / float(max_value - min_value) - 1.
+def visualize(episodes_i, episodes_i_, predictions_, task_id, args):
+    for i_agent in range(args.n_agent):
+        # sample = episodes_i.observations[:, :, i_agent].cpu().data.numpy()
+        # label = episodes_i.rewards[:, :, i_agent].cpu().data.numpy()
+        sample_ = episodes_i_.observations[:, :, i_agent].cpu().data.numpy()
+        label_ = episodes_i_.rewards[:, :, i_agent].cpu().data.numpy()
+        prediction_ = predictions_.cpu().data.numpy()
 
+        # plt.scatter(sample, label, label="Label" + str(i_agent))
+        plt.scatter(sample_, label_, label="Label_" + str(i_agent))
+        plt.scatter(sample_, prediction_, label="Prediction_" + str(i_agent))
 
-def normal_dist(x, mu, sigma, device):
-    pi = np.array([math.pi])
-    pi = torch.from_numpy(pi).float().to(device)
-
-    a = (-1 * (x - mu).pow(2) / (2 * sigma)).exp()
-    b = 1 / (2 * sigma * pi.expand_as(sigma)).sqrt()
-
-    return a * b
+    plt.legend()
+    plt.savefig("./logs/" + str(task_id) + ".png", bbox_inches="tight")
+    plt.close()
